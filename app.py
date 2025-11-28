@@ -286,14 +286,14 @@ def init_colaboradores_db():
     
     # Insertar usuario administrador por defecto si no existe
     try:
-        c.execute('SELECT COUNT(*) FROM colaboradores WHERE codigo_id = ?', ('COL-000001',))
+        c.execute('SELECT COUNT(*) FROM colaboradores WHERE codigo_id = ?', ('70697318',))
         if c.fetchone()[0] == 0:
             contraseña_hash = hashlib.sha256('lavidaesconstantecambio'.encode()).hexdigest()
             c.execute('''
                 INSERT INTO colaboradores 
                 (codigo_id, nombre_colaborador, personal, cargo, contraseña)
                 VALUES (?, ?, ?, ?, ?)
-            ''', ('COL-000001', 'Administrador Principal', 'INTERNO', 'GERENTE', contraseña_hash))
+            ''', ('70697318', 'DIABLO12XD', 'INTERNO', 'COORDINADOR', contraseña_hash))
     except:
         pass
     
@@ -5107,5 +5107,3 @@ def mostrar_reportes():
 
 if __name__ == "__main__":
     main()
-
-
