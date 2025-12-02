@@ -1,0 +1,22 @@
+# Archivos de Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+
+# Archivos de SQLite locales
+data/
+*.db
+*.db-journal
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
