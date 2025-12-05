@@ -1,22 +1,27 @@
-# Archivos de Python
+# Secrets
+.streamlit/secrets.toml
+*.json
+*.pem
+
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-.Python
+
+# Environment
+.env
+.venv
 env/
 venv/
-.venv/
 ENV/
 
-# Archivos de SQLite locales
-data/
+# Database
 *.db
-*.db-journal
+data/
+/tmp/
 
-# Streamlit
-.streamlit/secrets.toml
-
-# Sistema operativo
-.DS_Store
-Thumbs.db
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
