@@ -38,6 +38,7 @@ USAR_GOOGLE_SHEETS = True  # Cambiar a False si quieres deshabilitar
 # Inicializar Google Sheets si está habilitado
 st.session_state.use_google_sheets = False
 st.session_state.gs_client = None
+st.session_state.spreadsheet = None  # Para almacenar la hoja principal
 
 if USAR_GOOGLE_SHEETS:
     try:
@@ -60,10 +61,10 @@ if USAR_GOOGLE_SHEETS:
             # Probar la conexión
             try:
                 # Intentar listar archivos para verificar conexión
-                gs_client.list_spreadsheet_files()
+                files = gs_client.list_spreadsheet_files()
                 st.session_state.gs_client = gs_client
                 st.session_state.use_google_sheets = True
-                print("✅ Conexión a Google Sheets exitosa")
+                print(f"✅ Conexión a Google Sheets exitosa. {len(files)} archivos encontrados")
             except Exception as e:
                 print(f"❌ Error al conectar con Google Sheets: {e}")
                 st.session_state.gs_client = None
@@ -84,9 +85,10 @@ else:
     print("📁 Google Sheets deshabilitado por configuración")
     st.session_state.use_google_sheets = False
 
-# ===============================FUNCIONES PARA GOOGLE SHEETS (VERSIÓN MEJORADA)================================
-def get_or_create_sheet(sheet_name, worksheet_name="Datos"):
-    """Obtener o crear hoja en Google Sheets - CON CREACIÓN FORZADA"""
+# ===============================FUNCIONES PARA GOOGLE SHEETS (VERSIÓN ÚNICA HOJA)================================
+
+def get_spreadsheet():
+    """Obtener o crear una sola hoja de cálculo para todo el sistema"""
     if not st.session_state.use_google_sheets:
         return None
     
@@ -95,84 +97,175 @@ def get_or_create_sheet(sheet_name, worksheet_name="Datos"):
         if not client:
             return None
         
-        spreadsheet = None
+        spreadsheet_name = "Sistema_Mantenimiento"
         
-        # PRIMERO: Intentar abrir existente
+        # Si ya tenemos la hoja en session_state, usarla
+        if hasattr(st.session_state, 'spreadsheet') and st.session_state.spreadsheet:
+            return st.session_state.spreadsheet
+        
         try:
-            print(f"🔍 Buscando hoja: {sheet_name}")
-            spreadsheet = client.open(sheet_name)
-            print(f"✅ Hoja encontrada: {sheet_name}")
+            # Intentar abrir existente
+            print(f"🔍 Buscando hoja: {spreadsheet_name}")
+            spreadsheet = client.open(spreadsheet_name)
+            print(f"✅ Hoja encontrada: {spreadsheet_name}")
         except gspread.exceptions.SpreadsheetNotFound:
-            # SEGUNDO: Crear nueva si no existe
-            print(f"📄 Creando nueva hoja: {sheet_name}")
+            # Crear nueva si no existe
+            print(f"📄 Creando nueva hoja: {spreadsheet_name}")
             try:
-                spreadsheet = client.create(sheet_name)
-                time.sleep(3)  # Esperar más para creación
-                print(f"✅ Hoja creada exitosamente: {sheet_name}")
-                
-                # Compartir si es necesario (opcional)
-                # spreadsheet.share(None, perm_type='anyone', role='reader')
-            except Exception as create_error:
-                print(f"❌ Error creando hoja {sheet_name}: {create_error}")
-                # Intentar abrir de nuevo por si se creó pero hay error de caché
+                # Crear hoja de cálculo principal
+                spreadsheet = client.create(spreadsheet_name)
+                time.sleep(3)
+                print(f"✅ Hoja creada exitosamente: {spreadsheet_name}")
+            except Exception as e:
+                print(f"❌ Error creando hoja principal: {e}")
+                return None
+        
+        # Guardar en session_state para reutilizar
+        st.session_state.spreadsheet = spreadsheet
+        return spreadsheet
+    except Exception as e:
+        print(f"❌ Error en get_spreadsheet: {e}")
+        return None
+
+def get_or_create_worksheet(spreadsheet, worksheet_name):
+    """Obtener o crear worksheet dentro de la hoja principal"""
+    try:
+        try:
+            worksheet = spreadsheet.worksheet(worksheet_name)
+            print(f"✅ Worksheet encontrada: {worksheet_name}")
+        except gspread.exceptions.WorksheetNotFound:
+            print(f"📋 Creando nueva worksheet: {worksheet_name}")
+            try:
+                worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=1000, cols=50)
+                time.sleep(2)
+                print(f"✅ Worksheet creada: {worksheet_name}")
+            except Exception as e:
+                print(f"⚠️ Error creando worksheet {worksheet_name}: {e}")
+                # Usar primera hoja si no se puede crear
                 try:
-                    spreadsheet = client.open(sheet_name)
+                    worksheet = spreadsheet.get_worksheet(0)
+                    # Renombrar la primera hoja
+                    worksheet.update_title(worksheet_name)
+                    print(f"✅ Usando y renombrando primera hoja como: {worksheet_name}")
                 except:
                     return None
         
-        # TERCERO: Obtener o crear worksheet
-        if spreadsheet:
-            try:
-                worksheet = spreadsheet.worksheet(worksheet_name)
-                print(f"✅ Worksheet encontrada: {worksheet_name}")
-            except gspread.exceptions.WorksheetNotFound:
-                # Crear worksheet si no existe
-                print(f"📋 Creando nueva worksheet: {worksheet_name}")
-                try:
-                    worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=1000, cols=50)
-                    time.sleep(2)  # Esperar para creación de worksheet
-                    print(f"✅ Worksheet creada exitosamente: {worksheet_name}")
-                except Exception as ws_error:
-                    print(f"⚠️ Error creando worksheet: {ws_error}")
-                    # Intentar usar la primera hoja por defecto
-                    try:
-                        worksheet = spreadsheet.get_worksheet(0)
-                    except:
-                        return None
-            
-            return worksheet
-        
-        return None
+        return worksheet
     except Exception as e:
-        print(f"❌ Error en get_or_create_sheet para {sheet_name}: {e}")
+        print(f"❌ Error en get_or_create_worksheet: {e}")
         return None
-def cargar_desde_google_sheets(tabla_nombre, conn_local):
-    """Cargar datos desde Google Sheets a SQLite local - MEJORADA"""
+
+def guardar_en_google_sheets(tabla_nombre, conn_local):
+    """Guardar datos en worksheet específica de la hoja principal"""
     if not st.session_state.use_google_sheets:
         return False
     
     try:
-        worksheet = get_or_create_sheet(f"Sistema_Mantenimiento_{tabla_nombre}")
-        if not worksheet:
-            print(f"⚠️ No se pudo obtener worksheet para {tabla_nombre}")
+        # Obtener hoja principal
+        spreadsheet = get_spreadsheet()
+        if not spreadsheet:
             return False
         
-        # Leer todos los datos
-        print(f"📖 Leyendo datos de {tabla_nombre} desde Google Sheets...")
+        # Obtener worksheet específica para esta tabla
+        worksheet = get_or_create_worksheet(spreadsheet, tabla_nombre)
+        if not worksheet:
+            return False
+        
+        # Leer datos locales
+        df = pd.read_sql_query(f"SELECT * FROM {tabla_nombre}", conn_local)
+        
+        if df.empty:
+            print(f"ℹ️ Tabla {tabla_nombre} vacía")
+            # Solo crear encabezados si la hoja está vacía
+            try:
+                existing_data = worksheet.get_all_values()
+                if len(existing_data) == 0:
+                    # Obtener columnas de la tabla para crear encabezados
+                    c = conn_local.cursor()
+                    c.execute(f"PRAGMA table_info({tabla_nombre})")
+                    columnas = [col[1] for col in c.fetchall()]
+                    worksheet.update([columnas])
+                    print(f"✅ Encabezados creados para {tabla_nombre}")
+            except Exception as e:
+                print(f"⚠️ Error creando encabezados: {e}")
+            return True
+        
+        print(f"💾 Guardando {len(df)} registros en {tabla_nombre}...")
+        
+        # Preparar datos
+        df = df.fillna('')
+        
+        # Convertir bytes a base64
+        for col in df.columns:
+            if df[col].apply(lambda x: isinstance(x, bytes)).any():
+                df[col] = df[col].apply(lambda x: base64.b64encode(x).decode('utf-8') if isinstance(x, bytes) else str(x))
+        
+        # Convertir todo a string
+        df = df.astype(str)
+        encabezados = df.columns.tolist()
+        datos = df.values.tolist()
+        
+        # Actualizar hoja
+        try:
+            # Limpiar hoja
+            worksheet.clear()
+            time.sleep(1)
+            
+            # Actualizar en lotes pequeños
+            batch_size = 100
+            all_data = [encabezados] + datos
+            
+            for i in range(0, len(all_data), batch_size):
+                batch = all_data[i:i+batch_size]
+                if i == 0:
+                    worksheet.update(batch)
+                else:
+                    worksheet.append_rows(batch)
+                time.sleep(1)
+            
+            print(f"✅ {len(df)} registros guardados en {tabla_nombre}")
+            return True
+            
+        except Exception as e:
+            print(f"⚠️ Error actualizando {tabla_nombre}: {e}")
+            
+            # Intentar método más simple
+            try:
+                worksheet.clear()
+                worksheet.update([encabezados] + datos)
+                print(f"✅ {tabla_nombre} actualizado con método simple")
+                return True
+            except Exception as e2:
+                print(f"❌ Error método simple para {tabla_nombre}: {e2}")
+                return False
+            
+    except Exception as e:
+        print(f"❌ Error guardando {tabla_nombre}: {e}")
+        return False
+
+def cargar_desde_google_sheets(tabla_nombre, conn_local):
+    """Cargar datos desde worksheet específica"""
+    if not st.session_state.use_google_sheets:
+        return True  # Devuelve True para continuar sin error
+    
+    try:
+        # Obtener hoja principal
+        spreadsheet = get_spreadsheet()
+        if not spreadsheet:
+            return True  # No es error si no hay hoja
+        
+        # Intentar obtener worksheet
+        try:
+            worksheet = spreadsheet.worksheet(tabla_nombre)
+        except:
+            print(f"ℹ️ Worksheet {tabla_nombre} no existe aún")
+            return True  # No es error si no existe
+        
+        # Leer datos
         datos = worksheet.get_all_values()
         
-        if len(datos) < 2:  # Solo encabezados o vacío
-            print(f"ℹ️ Hoja {tabla_nombre} vacía o solo tiene encabezados")
-            # Crear tabla vacía con estructura correcta
-            c = conn_local.cursor()
-            
-            # Obtener estructura de la tabla local para crear encabezados
-            if tabla_nombre == 'avisos':
-                c.execute("PRAGMA table_info(avisos)")
-                columnas = [col[1] for col in c.fetchall() if col[1] != 'id']
-                worksheet.update([columnas])
-                print(f"✅ Encabezados creados para {tabla_nombre}")
-            
+        if len(datos) < 2:
+            print(f"ℹ️ Worksheet {tabla_nombre} vacía o solo tiene encabezados")
             return True
         
         # Convertir a DataFrame
@@ -180,178 +273,54 @@ def cargar_desde_google_sheets(tabla_nombre, conn_local):
         filas = datos[1:]
         
         if not filas:
-            print(f"ℹ️ Hoja {tabla_nombre} no tiene datos")
             return True
         
         df = pd.DataFrame(filas, columns=encabezados)
         
-        # Verificar si hay datos válidos
-        if len(df) == 0:
-            return True
-        
-        # Limpiar tabla local antes de insertar
+        # Guardar en SQLite local
+        # Primero limpiar tabla
         c = conn_local.cursor()
         c.execute(f"DELETE FROM {tabla_nombre}")
         
-        # Insertar datos en SQLite
-        # Para simplificar, usamos un enfoque directo
+        # Insertar datos fila por fila
+        success_count = 0
         for _, row in df.iterrows():
-            # Construir query dinámica
-            columnas = ', '.join(df.columns)
-            placeholders = ', '.join(['?' for _ in df.columns])
-            valores = tuple(row)
-            
             try:
+                # Construir query dinámica
+                columnas = ', '.join(df.columns)
+                placeholders = ', '.join(['?' for _ in df.columns])
+                valores = tuple(row)
+                
+                # Insertar fila
                 c.execute(f"INSERT INTO {tabla_nombre} ({columnas}) VALUES ({placeholders})", valores)
+                success_count += 1
             except Exception as e:
                 print(f"⚠️ Error insertando fila en {tabla_nombre}: {e}")
                 continue
         
         conn_local.commit()
-        
-        print(f"✅ {len(df)} registros cargados desde Google Sheets a {tabla_nombre}")
+        print(f"✅ {success_count}/{len(df)} registros cargados desde {tabla_nombre}")
         return True
+        
     except Exception as e:
-        print(f"⚠️ Error cargando {tabla_nombre} desde Google Sheets: {e}")
-        # Intentar crear la hoja si falla
-        try:
-            worksheet = get_or_create_sheet(f"Sistema_Mantenimiento_{tabla_nombre}")
-            if worksheet:
-                # Crear encabezados básicos
-                if tabla_nombre == 'avisos':
-                    encabezados = [
-                        'codigo_padre', 'codigo_mantto', 'codigo_ot_base', 'estado',
-                        'antiguedad', 'area', 'equipo', 'codigo_equipo', 'componentes',
-                        'descripcion_problema', 'ingresado_por', 'ingresado_el'
-                    ]
-                elif tabla_nombre == 'equipos':
-                    encabezados = ['codigo_equipo', 'equipo', 'area', 'descripcion_funcionalidad']
-                elif tabla_nombre == 'colaboradores':
-                    encabezados = ['codigo_id', 'nombre_colaborador', 'personal', 'cargo', 'contraseña']
-                
-                worksheet.update([encabezados])
-                print(f"✅ Hoja {tabla_nombre} creada con encabezados básicos")
-        except:
-            pass
-        
-        return False
-        
-def guardar_en_google_sheets(tabla_nombre, conn_local):
-    """Guardar datos desde SQLite local a Google Sheets - MEJORADA"""
-    if not st.session_state.use_google_sheets:
-        return False
-    
-    try:
-        # PRIMERO: Obtener o crear la hoja
-        worksheet = get_or_create_sheet(f"Sistema_Mantenimiento_{tabla_nombre}")
-        if not worksheet:
-            print(f"❌ No se pudo obtener/crear worksheet para {tabla_nombre}")
-            return False
-        
-        # SEGUNDO: Leer datos locales
-        df = pd.read_sql_query(f"SELECT * FROM {tabla_nombre}", conn_local)
-        
-        if df.empty:
-            print(f"ℹ️ Tabla {tabla_nombre} vacía, solo se crearán encabezados")
-            # Crear encabezados en la hoja vacía
-            encabezados = df.columns.tolist()
-            worksheet.update([encabezados])
-            return True
-        
-        print(f"💾 Guardando {len(df)} registros de {tabla_nombre} en Google Sheets...")
-        
-        # TERCERO: Preparar datos para Google Sheets
-        # Convertir BLOB a base64 string
-        for col in df.columns:
-            if df[col].dtype == object:
-                # Convertir bytes a base64 string
-                if df[col].apply(lambda x: isinstance(x, bytes)).any():
-                    df[col] = df[col].apply(lambda x: base64.b64encode(x).decode('utf-8') if isinstance(x, bytes) else x)
-        
-        # Convertir todos los datos a string y limpiar NaN
-        df = df.astype(str).fillna('')
-        encabezados = df.columns.tolist()
-        datos = df.values.tolist()
-        
-        # CUARTO: Limpiar y actualizar hoja completa
-        worksheet.clear()
-        
-        # Actualizar todos los datos de una vez
-        try:
-            worksheet.update([encabezados] + datos)
-            print(f"✅ Datos actualizados en lote para {tabla_nombre}")
-        except Exception as batch_error:
-            print(f"⚠️ Error en actualización por lotes: {batch_error}")
-            # Intentar método alternativo: actualizar en partes más pequeñas
-            try:
-                # Primero los encabezados
-                worksheet.update([encabezados])
-                
-                # Luego los datos en lotes más pequeños
-                batch_size = 50
-                for i in range(0, len(datos), batch_size):
-                    batch = datos[i:i+batch_size]
-                    if i == 0:
-                        # Los primeros datos van después de los encabezados
-                        cell_range = f"A2:{chr(65 + len(encabezados) - 1)}{2 + len(batch)}"
-                        worksheet.update(cell_range, batch)
-                    else:
-                        worksheet.append_rows(batch)
-                    time.sleep(1)  # Esperar entre lotes
-                print(f"✅ Datos actualizados en lotes pequeños para {tabla_nombre}")
-            except Exception as alt_error:
-                print(f"❌ Error en método alternativo para {tabla_nombre}: {alt_error}")
-                return False
-        
-        print(f"✅ {len(df)} registros guardados en Google Sheets desde {tabla_nombre}")
-        return True
-    except Exception as e:
-        print(f"❌ Error guardando {tabla_nombre} en Google Sheets: {e}")
-        return False
-
-def cargar_desde_google_sheets(tabla_nombre, conn_local):
-    """Cargar datos desde Google Sheets a SQLite local"""
-    if not st.session_state.use_google_sheets:
-        return False
-    
-    try:
-        worksheet = get_or_create_sheet(f"Sistema_Mantenimiento_{tabla_nombre}")
-        if not worksheet:
-            return False
-        
-        # Leer todos los datos
-        datos = worksheet.get_all_values()
-        
-        if len(datos) < 2:  # Solo encabezados o vacío
-            print(f"ℹ️ Hoja {tabla_nombre} vacía o solo tiene encabezados")
-            return False
-        
-        # Convertir a DataFrame
-        encabezados = datos[0]
-        filas = datos[1:]
-        
-        if not filas:
-            print(f"ℹ️ Hoja {tabla_nombre} no tiene datos")
-            return False
-        
-        df = pd.DataFrame(filas, columns=encabezados)
-        
-        # Guardar en SQLite local
-        df.to_sql(tabla_nombre, conn_local, if_exists='replace', index=False)
-        
-        print(f"✅ {len(df)} registros cargados desde Google Sheets a {tabla_nombre}")
-        return True
-    except Exception as e:
-        print(f"⚠️ Error cargando {tabla_nombre} desde Google Sheets: {e}")
-        return False
+        print(f"⚠️ Error cargando {tabla_nombre}: {e}")
+        return True  # Devuelve True para continuar sin error
 
 def sincronizar_todas_tablas():
-    """Sincronizar todas las tablas a Google Sheets - MEJORADA"""
+    """Sincronizar todas las tablas a Google Sheets"""
     if not st.session_state.use_google_sheets:
         print("⚠️ Google Sheets no está habilitado")
         return 0
     
     print("🔄 Iniciando sincronización completa con Google Sheets...")
+    
+    # Obtener hoja principal primero
+    spreadsheet = get_spreadsheet()
+    if not spreadsheet:
+        print("❌ No se pudo obtener la hoja principal")
+        return 0
+    
+    print(f"✅ Usando hoja: {spreadsheet.title}")
     
     tablas = [
         ('avisos', conn_avisos),
@@ -445,8 +414,7 @@ def init_avisos_db():
     # CARGAR DESDE GOOGLE SHEETS SI ESTÁ HABILITADO
     if st.session_state.use_google_sheets:
         print(f"🔄 Cargando avisos desde Google Sheets...")
-        if not cargar_desde_google_sheets('avisos', conn):
-            print("⚠️ No se pudieron cargar avisos desde Google Sheets")
+        cargar_desde_google_sheets('avisos', conn)
     
     conn.commit()
     return conn
@@ -475,8 +443,7 @@ def init_equipos_db():
     # CARGAR DESDE GOOGLE SHEETS SI ESTÁ HABILITADO
     if st.session_state.use_google_sheets:
         print(f"🔄 Cargando equipos desde Google Sheets...")
-        if not cargar_desde_google_sheets('equipos', conn):
-            print("⚠️ No se pudieron cargar equipos desde Google Sheets")
+        cargar_desde_google_sheets('equipos', conn)
     
     conn.commit()
     return conn
@@ -536,8 +503,7 @@ def init_ot_unicas_db():
     # CARGAR DESDE GOOGLE SHEETS SI ESTÁ HABILITADO
     if st.session_state.use_google_sheets:
         print(f"🔄 Cargando ot_unicas desde Google Sheets...")
-        if not cargar_desde_google_sheets('ot_unicas', conn):
-            print("⚠️ No se pudieron cargar ot_unicas desde Google Sheets")
+        cargar_desde_google_sheets('ot_unicas', conn)
     
     conn.commit()
     return conn
@@ -598,8 +564,7 @@ def init_ot_sufijos_db():
     # CARGAR DESDE GOOGLE SHEETS SI ESTÁ HABILITADO
     if st.session_state.use_google_sheets:
         print(f"🔄 Cargando ot_sufijos desde Google Sheets...")
-        if not cargar_desde_google_sheets('ot_sufijos', conn):
-            print("⚠️ No se pudieron cargar ot_sufijos desde Google Sheets")
+        cargar_desde_google_sheets('ot_sufijos', conn)
     
     conn.commit()
     return conn
@@ -639,8 +604,7 @@ def init_colaboradores_db():
     # CARGAR DESDE GOOGLE SHEETS SI ESTÁ HABILITADO
     if st.session_state.use_google_sheets:
         print(f"🔄 Cargando colaboradores desde Google Sheets...")
-        if not cargar_desde_google_sheets('colaboradores', conn):
-            print("⚠️ No se pudieron cargar colaboradores desde Google Sheets")
+        cargar_desde_google_sheets('colaboradores', conn)
     
     conn.commit()
     return conn
@@ -1103,12 +1067,7 @@ def agregar_colaborador_con_sincronizacion(codigo_id, nombre_colaborador, person
                 if guardar_en_google_sheets('colaboradores', conn_colaboradores):
                     st.success("✅ Guardado en la nube exitosamente!")
                 else:
-                    # Intentar crear la hoja si falla
-                    worksheet = get_or_create_sheet('Sistema_Mantenimiento_colaboradores')
-                    if worksheet:
-                        st.success("✅ Hoja creada y datos guardados!")
-                    else:
-                        st.warning("⚠️ Guardado solo localmente")
+                    st.warning("⚠️ Guardado solo localmente")
         
         st.success(f"✅ Colaborador '{nombre_colaborador}' agregado exitosamente!")
         st.success(f"🔑 Código para login: **{codigo_id}**")
@@ -1120,7 +1079,7 @@ def agregar_colaborador_con_sincronizacion(codigo_id, nombre_colaborador, person
     except Exception as e:
         st.error(f"❌ Error al agregar colaborador: {str(e)}")
         return False
-
+        
 def actualizar_colaborador(codigo_id_actual, nuevo_codigo_id, nombre_colaborador, personal, cargo, nueva_contraseña=None):
     """Actualizar datos de un colaborador existente"""
     try:
@@ -1822,6 +1781,40 @@ def eliminar_archivo_equipo(codigo_equipo, tipo_archivo):
             return True
     except Exception as e:
         st.error(f"❌ Error al eliminar archivo: {str(e)}")
+        return False
+
+def agregar_equipo_con_sincronizacion(codigo_equipo, equipo, area, descripcion_funcionalidad,
+                                     especificaciones_nombre=None, especificaciones_datos=None,
+                                     informes_json="[]"):
+    """Agregar nuevo equipo con sincronización automática"""
+    try:
+        c = conn_equipos.cursor()
+        c.execute('''
+            INSERT INTO equipos 
+            (codigo_equipo, equipo, area, descripcion_funcionalidad, 
+             especificaciones_tecnica_nombre, especificaciones_tecnica_datos,
+             informes_json, actualizado_en)
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ''', (codigo_equipo, equipo, area, descripcion_funcionalidad,
+              especificaciones_nombre, especificaciones_datos,
+              informes_json))
+        
+        conn_equipos.commit()
+        
+        # SINCRONIZAR INMEDIATAMENTE
+        if st.session_state.use_google_sheets:
+            with st.spinner("🔄 Sincronizando con la nube..."):
+                if guardar_en_google_sheets('equipos', conn_equipos):
+                    st.success("✅ Guardado en la nube exitosamente!")
+                else:
+                    st.warning("⚠️ Guardado solo localmente")
+        
+        return True
+    except sqlite3.IntegrityError:
+        st.error("❌ Error: El código del equipo ya existe en la base de datos")
+        return False
+    except Exception as e:
+        st.error(f"❌ Error al guardar el equipo: {str(e)}")
         return False
 
 def editar_equipo():
@@ -5465,13 +5458,13 @@ def main():
     
     selected_menu = st.sidebar.selectbox("Navegación", menu_options)
     
-    def agregar_boton_sincronizacion():
-        """Agregar botón de sincronización manual en el sidebar"""
+    # SECCIÓN DE SINCRO EN SIDEBAR
+    st.sidebar.markdown("---")
+    with st.sidebar.expander("🔄 Sincronización", expanded=False):
+        
         if st.session_state.use_google_sheets:
-            st.sidebar.markdown("---")
-            st.sidebar.subheader("🔄 Sincronización")
-            
-            if st.sidebar.button("🔄 Sincronizar Todo con Google Sheets", use_container_width=True):
+            # Botón para guardar en la nube
+            if st.button("⬆️ Sincronizar Todo con Google Sheets", use_container_width=True):
                 with st.spinner("Sincronizando todas las bases de datos..."):
                     exitos = sincronizar_todas_tablas()
                     if exitos > 0:
@@ -5482,7 +5475,7 @@ def main():
             st.markdown("---")
             
         # Backup local
-        if st.button("💾 Crear Backup", use_container_width=True):
+        if st.button("💾 Crear Backup Local", use_container_width=True):
             backup_file = crear_backup_local()
             if backup_file:
                 with open(backup_file, "rb") as f:
@@ -5490,7 +5483,8 @@ def main():
                         label="📥 Descargar Backup",
                         data=f,
                         file_name=backup_file.name,
-                        mime="application/zip"
+                        mime="application/zip",
+                        use_container_width=True
                     )
     
     # Información de usuario
@@ -5532,28 +5526,82 @@ def main():
         
         st.markdown("---")
         
+        # Información del estado de Google Sheets
         if st.session_state.use_google_sheets:
-            st.success("✅ **Persistencia activada**")
-            st.info("📊 **Datos guardados en:** Google Sheets")
-            st.info("🔄 **Sincronización automática:** Cada vez que agregas datos")
+            try:
+                spreadsheet = get_spreadsheet()
+                if spreadsheet:
+                    st.success("✅ **Google Sheets conectado**")
+                    st.info(f"📊 **Hoja principal:** {spreadsheet.title}")
+                    st.info("🔄 **Sincronización:** Manual/Automática al guardar")
+                else:
+                    st.warning("⚠️ **Google Sheets configurado pero no accesible**")
+            except:
+                st.warning("⚠️ **Google Sheets configurado pero no accesible**")
         else:
-            if EN_STREAMLIT_CLOUD:
-                st.warning("⚠️ **Configura Google Sheets para persistencia:**")
-                st.code("""
-1. Agrega credenciales en Secrets
-2. Cambia USAR_GOOGLE_SHEETS = True
-                """)
-            else:
-                st.success("💻 **Modo local activado**")
-                st.info("📁 **Datos guardados en:** `data/` (tu computadora)")
+            st.info("📁 **Modo local activado**")
+            st.info("💾 **Backup recomendado:** Usa el botón en el menú lateral")
         
+        # Instrucciones rápidas
+        st.markdown("---")
+        st.subheader("🚀 Acciones Rápidas")
+        
+        col_acc1, col_acc2, col_acc3 = st.columns(3)
+        
+        with col_acc1:
+            if st.button("👥 Agregar Colaborador", use_container_width=True):
+                st.session_state.ir_a_colaboradores = True
+                st.rerun()
+        
+        with col_acc2:
+            if st.button("🏭 Agregar Equipo", use_container_width=True):
+                st.session_state.ir_a_equipos = True
+                st.rerun()
+        
+        with col_acc3:
+            if st.button("📝 Crear Aviso", use_container_width=True):
+                st.session_state.ir_a_avisos = True
+                st.rerun()
+    
     elif selected_menu == "🏭 Gestión de Equipos":
         st.title("🏭 Gestión de Equipos")
         
         tab1, tab2 = st.tabs(["➕ Agregar Nuevo Equipo", "📊 Lista de Equipos"])
         
         with tab1:
-            mostrar_formulario_equipos()
+            st.header("📋 Agregar Nuevo Equipo")
+            
+            with st.form("formulario_equipo", clear_on_submit=True):
+                st.subheader("Información Básica del Equipo")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    codigo_equipo = st.text_input("Código del Equipo *", placeholder="Ej: EQ-001")
+                    equipo = st.text_input("Nombre del Equipo *", placeholder="Ej: Bomba Centrífuga")
+                    area = st.text_input("Área *", placeholder="Ej: Planta de Procesos")
+                
+                with col2:
+                    descripcion_funcionalidad = st.text_area(
+                        "Descripción de Funcionalidad *", 
+                        placeholder="Describa la función principal del equipo...",
+                        height=100
+                    )
+                
+                st.markdown("**Campos obligatorios *")
+                submitted = st.form_submit_button("💾 Guardar Equipo")
+                
+                if submitted:
+                    # Validar campos obligatorios
+                    if not codigo_equipo or not equipo or not area or not descripcion_funcionalidad:
+                        st.error("Por favor, complete todos los campos obligatorios (*)")
+                        return
+                    
+                    if agregar_equipo_con_sincronizacion(
+                        codigo_equipo, equipo, area, descripcion_funcionalidad
+                    ):
+                        st.success(f"✅ Equipo '{equipo}' guardado exitosamente!")
+                        st.balloons()
         
         with tab2:
             st.subheader("📊 Equipos Registrados")
@@ -5563,6 +5611,13 @@ def main():
                     st.info("No hay equipos registrados")
                 else:
                     st.dataframe(df, use_container_width=True)
+                    
+                    # Opción para sincronizar
+                    if st.session_state.use_google_sheets:
+                        if st.button("🔄 Sincronizar Equipos con Google Sheets"):
+                            with st.spinner("Sincronizando..."):
+                                if guardar_en_google_sheets('equipos', conn_equipos):
+                                    st.success("✅ Equipos sincronizados exitosamente!")
             except Exception as e:
                 st.error(f"Error: {e}")
     
@@ -5583,7 +5638,7 @@ def main():
                     cargo = st.selectbox("Cargo *", [
                         "GERENTE", "JEFE DE MANTENIMIENTO", 
                         "TECNICO MECANICO", "TECNICO ELECTRICO",
-                        "SUPERVISOR", "PLANNER DE MANTTO"
+                        "SUPERVISOR", "PLANNER DE MANTTO", "ADMINISTRADOR"
                     ])
                     contraseña = st.text_input("Contraseña *", type="password", placeholder="Mínimo 6 caracteres")
                     confirmar = st.text_input("Confirmar Contraseña *", type="password")
@@ -5609,6 +5664,13 @@ def main():
                     st.info("No hay colaboradores registrados")
                 else:
                     st.dataframe(df, use_container_width=True)
+                    
+                    # Opción para sincronizar
+                    if st.session_state.use_google_sheets:
+                        if st.button("🔄 Sincronizar Colaboradores con Google Sheets"):
+                            with st.spinner("Sincronizando..."):
+                                if guardar_en_google_sheets('colaboradores', conn_colaboradores):
+                                    st.success("✅ Colaboradores sincronizados exitosamente!")
             except Exception as e:
                 st.error(f"Error: {e}")
     
@@ -5624,6 +5686,13 @@ def main():
                 st.dataframe(df, use_container_width=True)
                 total = pd.read_sql("SELECT COUNT(*) as total FROM avisos", conn_avisos).iloc[0]['total']
                 st.write(f"Total registros: {total}")
+                
+                # Sincronizar
+                if st.session_state.use_google_sheets:
+                    if st.button("🔄 Sincronizar Avisos"):
+                        with st.spinner("Sincronizando..."):
+                            if guardar_en_google_sheets('avisos', conn_avisos):
+                                st.success("✅ Avisos sincronizados!")
             except:
                 st.info("Tabla vacía o error al cargar")
         
@@ -5634,6 +5703,13 @@ def main():
                 st.dataframe(df, use_container_width=True)
                 total = pd.read_sql("SELECT COUNT(*) as total FROM ot_unicas", conn_ot_unicas).iloc[0]['total']
                 st.write(f"Total registros: {total}")
+                
+                # Sincronizar
+                if st.session_state.use_google_sheets:
+                    if st.button("🔄 Sincronizar OT Únicas"):
+                        with st.spinner("Sincronizando..."):
+                            if guardar_en_google_sheets('ot_unicas', conn_ot_unicas):
+                                st.success("✅ OT Únicas sincronizadas!")
             except:
                 st.info("Tabla vacía o error al cargar")
         
@@ -5644,6 +5720,13 @@ def main():
                 st.dataframe(df, use_container_width=True)
                 total = pd.read_sql("SELECT COUNT(*) as total FROM ot_sufijos", conn_ot_sufijos).iloc[0]['total']
                 st.write(f"Total registros: {total}")
+                
+                # Sincronizar
+                if st.session_state.use_google_sheets:
+                    if st.button("🔄 Sincronizar OT Sufijos"):
+                        with st.spinner("Sincronizando..."):
+                            if guardar_en_google_sheets('ot_sufijos', conn_ot_sufijos):
+                                st.success("✅ OT Sufijos sincronizadas!")
             except:
                 st.info("Tabla vacía o error al cargar")
         
@@ -5654,6 +5737,13 @@ def main():
                 st.dataframe(df, use_container_width=True)
                 total = pd.read_sql("SELECT COUNT(*) as total FROM equipos", conn_equipos).iloc[0]['total']
                 st.write(f"Total registros: {total}")
+                
+                # Sincronizar
+                if st.session_state.use_google_sheets:
+                    if st.button("🔄 Sincronizar Equipos"):
+                        with st.spinner("Sincronizando..."):
+                            if guardar_en_google_sheets('equipos', conn_equipos):
+                                st.success("✅ Equipos sincronizados!")
             except:
                 st.info("Tabla vacía o error al cargar")
         
@@ -5664,8 +5754,16 @@ def main():
                 st.dataframe(df, use_container_width=True)
                 total = pd.read_sql("SELECT COUNT(*) as total FROM colaboradores", conn_colaboradores).iloc[0]['total']
                 st.write(f"Total registros: {total}")
+                
+                # Sincronizar
+                if st.session_state.use_google_sheets:
+                    if st.button("🔄 Sincronizar Colaboradores"):
+                        with st.spinner("Sincronizando..."):
+                            if guardar_en_google_sheets('colaboradores', conn_colaboradores):
+                                st.success("✅ Colaboradores sincronizados!")
             except:
                 st.info("Tabla vacía o error al cargar")
 
+# Para manejar las redirecciones desde la página de inicio
 if __name__ == "__main__":
     main()
