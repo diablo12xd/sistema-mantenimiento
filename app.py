@@ -5598,7 +5598,7 @@ def main():
                     elif len(contraseña) < 6:
                         st.error("❌ La contraseña debe tener al menos 6 caracteres")
                     else:
-                        if agregar_colaborador(codigo_id, nombre, personal, cargo, contraseña):
+                        if agregar_colaborador_con_sincronizacion(codigo_id, nombre, personal, cargo, contraseña):
                             st.rerun()
         
         with tab2:
