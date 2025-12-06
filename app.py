@@ -1,4 +1,4 @@
-# ===============================CONFIGURACIÓN DE PÁGINA (DEBE IR AL INICIO)================================
+# ===============================CONFIGURACIÓN DE PÁGINA================================
 import streamlit as st
 
 # Configuración de la página - ¡DEBE SER LA PRIMERA LÍNEA DE STREAMLIT!
@@ -18,44 +18,78 @@ import hashlib
 from io import BytesIO
 import json
 import base64
-import gspread
-from google.oauth2.service_account import Credentials
-from pathlib import Path
 import time
+from pathlib import Path
+import zipfile
 
-# ===============================CONFIGURACIÓN GOOGLE SHEETS COMO BASE PRINCIPAL================================
-SCOPE = ["https://www.googleapis.com/auth/spreadsheets",
-         "https://www.googleapis.com/auth/drive"]
+# ===============================DETECCIÓN AUTOMÁTICA DE ENTORNO================================
+# Determinar si estamos en Streamlit Cloud o local
+EN_STREAMLIT_CLOUD = 'STREAMLIT_SHARING' in os.environ or 'STREAMLIT_SERVER' in os.environ
 
-def init_google_sheets():
-    """Inicializar conexión con Google Sheets - VERSIÓN MEJORADA"""
+if EN_STREAMLIT_CLOUD:
+    print("🌐 Detectado: Streamlit Cloud")
+else:
+    print("💻 Detectado: Entorno local")
+
+# ===============================CONFIGURACIÓN GOOGLE SHEETS================================
+# Por defecto intentar usar Google Sheets si hay credenciales
+USAR_GOOGLE_SHEETS = True  # Cambiar a False si quieres deshabilitar
+
+# Inicializar Google Sheets si está habilitado
+st.session_state.use_google_sheets = False
+st.session_state.gs_client = None
+
+if USAR_GOOGLE_SHEETS:
     try:
-        if 'google_credentials' not in st.secrets:
-            st.error("⚠️ No se encontraron credenciales de Google Sheets")
-            st.info("""
-            Agrega tus credenciales en Streamlit Cloud:
-            App Settings → Secrets
-            """)
-            # Crear una base de datos temporal local
-            return None
+        import gspread
+        from google.oauth2.service_account import Credentials
         
-        creds_dict = st.secrets["google_credentials"]
-        creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPE)
-        client = gspread.authorize(creds)
-        return client
+        print("🔄 Intentando conectar a Google Sheets...")
+        
+        # Verificar si hay credenciales
+        if 'google_credentials' in st.secrets:
+            print("✅ Credenciales de Google Sheets encontradas")
+            
+            SCOPE = ["https://www.googleapis.com/auth/spreadsheets",
+                    "https://www.googleapis.com/auth/drive"]
+            
+            creds_dict = dict(st.secrets["google_credentials"])
+            creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPE)
+            gs_client = gspread.authorize(creds)
+            
+            # Probar la conexión
+            try:
+                # Intentar listar archivos para verificar conexión
+                gs_client.list_spreadsheet_files()
+                st.session_state.gs_client = gs_client
+                st.session_state.use_google_sheets = True
+                print("✅ Conexión a Google Sheets exitosa")
+            except Exception as e:
+                print(f"❌ Error al conectar con Google Sheets: {e}")
+                st.session_state.gs_client = None
+                st.session_state.use_google_sheets = False
+        else:
+            print("⚠️ No hay credenciales de Google Sheets en secrets")
+            st.session_state.gs_client = None
+            st.session_state.use_google_sheets = False
+            
+    except ImportError:
+        print("⚠️ gspread no está instalado. Instala con: pip install gspread google-auth")
+        st.session_state.use_google_sheets = False
     except Exception as e:
-        st.error(f"❌ Error Google Sheets: {str(e)[:100]}")
-        # Usar local como fallback
-        return None
+        print(f"❌ Error inicializando Google Sheets: {e}")
+        st.session_state.gs_client = None
+        st.session_state.use_google_sheets = False
+else:
+    print("📁 Google Sheets deshabilitado por configuración")
+    st.session_state.use_google_sheets = False
 
-# Inicializar una vez
-if 'gs_client' not in st.session_state:
-    st.session_state.gs_client = init_google_sheets()
-    st.session_state.use_google_sheets = st.session_state.gs_client is not None
-
-# ===============================SISTEMA HÍBRIDO: LOCAL + GOOGLE SHEETS================================
+# ===============================FUNCIONES PARA GOOGLE SHEETS================================
 def get_or_create_sheet(sheet_name, worksheet_name="Datos"):
-    """Obtener o crear hoja - VERSIÓN SEGURA"""
+    """Obtener o crear hoja en Google Sheets"""
+    if not st.session_state.use_google_sheets:
+        return None
+    
     try:
         client = st.session_state.gs_client
         if not client:
@@ -65,82 +99,42 @@ def get_or_create_sheet(sheet_name, worksheet_name="Datos"):
             # Intentar abrir existente
             spreadsheet = client.open(sheet_name)
         except gspread.exceptions.SpreadsheetNotFound:
-            try:
-                # Crear nueva con menos filas para ahorrar espacio
-                spreadsheet = client.create(sheet_name)
-                time.sleep(1)
-                st.info(f"✅ Nueva hoja creada: {sheet_name}")
-            except Exception as e:
-                if "quota" in str(e).lower():
-                    st.error(f"❌ Cuota excedida. No se creará: {sheet_name}")
-                    return None
-                raise e
+            # Crear nueva
+            spreadsheet = client.create(sheet_name)
+            time.sleep(1)
+            print(f"✅ Nueva hoja creada: {sheet_name}")
         
         try:
             worksheet = spreadsheet.worksheet(worksheet_name)
         except gspread.exceptions.WorksheetNotFound:
-            # Crear con menos filas iniciales
-            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=500, cols=30)
+            # Crear worksheet
+            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=1000, cols=50)
             time.sleep(0.5)
         
         return worksheet
     except Exception as e:
-        st.error(f"⚠️ Error con Google Sheets {sheet_name}: {e}")
+        print(f"⚠️ Error con Google Sheets {sheet_name}: {e}")
         return None
-
-def cargar_desde_google_sheets(tabla_nombre, conn_local):
-    """Cargar datos desde Google Sheets a SQLite local"""
-    try:
-        if not st.session_state.gs_client:
-            return False
-        
-        worksheet = get_or_create_sheet(f"Sistema_Mantenimiento_{tabla_nombre}")
-        if not worksheet:
-            return False
-        
-        # Leer todos los datos
-        datos = worksheet.get_all_values()
-        
-        if len(datos) < 2:  # Solo encabezados o vacío
-            return False
-        
-        # Convertir a DataFrame
-        encabezados = datos[0]
-        filas = datos[1:]
-        
-        if not filas:
-            return False
-        
-        df = pd.DataFrame(filas, columns=encabezados)
-        
-        # Guardar en SQLite local (reemplazar todo)
-        df.to_sql(tabla_nombre, conn_local, if_exists='replace', index=False)
-        
-        print(f"✅ {len(df)} registros cargados desde Google Sheets a {tabla_nombre}")
-        return True
-    except Exception as e:
-        print(f"⚠️ Error cargando {tabla_nombre} desde Google Sheets: {e}")
-        return False
 
 def guardar_en_google_sheets(tabla_nombre, conn_local):
     """Guardar datos desde SQLite local a Google Sheets"""
+    if not st.session_state.use_google_sheets:
+        return False
+    
     try:
-        if not st.session_state.gs_client:
-            return False
-        
         # Leer datos locales
         df = pd.read_sql_query(f"SELECT * FROM {tabla_nombre}", conn_local)
         
         if df.empty:
-            # Crear hoja vacía con encabezados
-            df_empty = pd.DataFrame(columns=get_table_columns(tabla_nombre, conn_local))
-            df = df_empty
+            print(f"ℹ️ Tabla {tabla_nombre} vacía, no se guardará en Google Sheets")
+            return True
         
         worksheet = get_or_create_sheet(f"Sistema_Mantenimiento_{tabla_nombre}")
         if not worksheet:
             return False
         
-        # Convertir columnas BLOB a string (base64) para Google Sheets
+        # Preparar datos para Google Sheets
+        # Convertir BLOB a base64 string
         for col in df.columns:
             if df[col].dtype == object:
                 # Convertir bytes a base64 string
@@ -152,10 +146,10 @@ def guardar_en_google_sheets(tabla_nombre, conn_local):
         encabezados = df.columns.tolist()
         datos = df.values.tolist()
         
-        # Actualizar hoja
+        # Limpiar y actualizar hoja
         worksheet.clear()
         
-        # Actualizar en lotes pequeños para evitar límites
+        # Actualizar en lotes para evitar límites de API
         batch_size = 100
         for i in range(0, len(datos), batch_size):
             batch = datos[i:i+batch_size]
@@ -168,17 +162,46 @@ def guardar_en_google_sheets(tabla_nombre, conn_local):
         print(f"✅ {len(df)} registros guardados en Google Sheets desde {tabla_nombre}")
         return True
     except Exception as e:
-        st.error(f"⚠️ Error guardando {tabla_nombre} en Google Sheets: {e}")
+        print(f"⚠️ Error guardando {tabla_nombre} en Google Sheets: {e}")
         return False
 
-def get_table_columns(table_name, conn):
-    """Obtener columnas de una tabla"""
-    cursor = conn.cursor()
-    cursor.execute(f"PRAGMA table_info({table_name})")
-    columns = [column[1] for column in cursor.fetchall()]
-    return columns
+def cargar_desde_google_sheets(tabla_nombre, conn_local):
+    """Cargar datos desde Google Sheets a SQLite local"""
+    if not st.session_state.use_google_sheets:
+        return False
+    
+    try:
+        worksheet = get_or_create_sheet(f"Sistema_Mantenimiento_{tabla_nombre}")
+        if not worksheet:
+            return False
+        
+        # Leer todos los datos
+        datos = worksheet.get_all_values()
+        
+        if len(datos) < 2:  # Solo encabezados o vacío
+            print(f"ℹ️ Hoja {tabla_nombre} vacía o solo tiene encabezados")
+            return False
+        
+        # Convertir a DataFrame
+        encabezados = datos[0]
+        filas = datos[1:]
+        
+        if not filas:
+            print(f"ℹ️ Hoja {tabla_nombre} no tiene datos")
+            return False
+        
+        df = pd.DataFrame(filas, columns=encabezados)
+        
+        # Guardar en SQLite local
+        df.to_sql(tabla_nombre, conn_local, if_exists='replace', index=False)
+        
+        print(f"✅ {len(df)} registros cargados desde Google Sheets a {tabla_nombre}")
+        return True
+    except Exception as e:
+        print(f"⚠️ Error cargando {tabla_nombre} desde Google Sheets: {e}")
+        return False
 
-def sincronizar_todas_tablas_a_google():
+def sincronizar_todas_tablas():
     """Sincronizar todas las tablas a Google Sheets"""
     if not st.session_state.use_google_sheets:
         return False
@@ -199,42 +222,23 @@ def sincronizar_todas_tablas_a_google():
     
     return exitos
 
-def cargar_todas_tablas_desde_google():
-    """Cargar todas las tablas desde Google Sheets"""
-    if not st.session_state.use_google_sheets:
-        return False
-    
-    tablas = [
-        ('avisos', conn_avisos),
-        ('equipos', conn_equipos),
-        ('ot_unicas', conn_ot_unicas),
-        ('ot_sufijos', conn_ot_sufijos),
-        ('colaboradores', conn_colaboradores)
-    ]
-    
-    exitos = 0
-    for nombre, conn in tablas:
-        if cargar_desde_google_sheets(nombre, conn):
-            exitos += 1
-            time.sleep(1)  # Esperar entre tablas
-    
-    return exitos
-
-# ===============================CONFIGURACIÓN PARA NUBE================================
+# ===============================CONFIGURACIÓN DE RUTAS================================
 def get_database_path(db_name):
     """Obtiene la ruta correcta para la base de datos"""
-    if 'STREAMLIT_SHARING' in os.environ or 'STREAMLIT_SERVER' in os.environ:
+    if EN_STREAMLIT_CLOUD:
+        # En Streamlit Cloud, usar /tmp para persistencia temporal
         temp_dir = Path("/tmp")
         temp_dir.mkdir(exist_ok=True)
         return str(temp_dir / db_name)
     else:
+        # Localmente, usar carpeta data/
         data_dir = Path("data")
         data_dir.mkdir(exist_ok=True)
         return str(data_dir / db_name)
 
-# ===============================INICIALIZACIÓN HÍBRIDA DE BASES DE DATOS================================
+# ===============================INICIALIZACIÓN DE BASES DE DATOS================================
 def init_avisos_db():
-    """Base de datos para avisos de mantenimiento - HÍBRIDA"""
+    """Base de datos para avisos de mantenimiento"""
     db_path = get_database_path('avisos.db')
     conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
     c = conn.cursor()
@@ -285,18 +289,47 @@ def init_avisos_db():
         )
     ''')
     
-    # CARGAR DESDE GOOGLE SHEETS AL INICIAR
+    # CARGAR DESDE GOOGLE SHEETS SI ESTÁ HABILITADO
     if st.session_state.use_google_sheets:
+        print(f"🔄 Cargando avisos desde Google Sheets...")
         if not cargar_desde_google_sheets('avisos', conn):
             print("⚠️ No se pudieron cargar avisos desde Google Sheets")
-    else:
-        print("ℹ️ Usando solo base de datos local para avisos")
+    
+    conn.commit()
+    return conn
+
+def init_equipos_db():
+    """Base de datos para información técnica de equipos"""
+    db_path = get_database_path('equipos.db')
+    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
+    c = conn.cursor()
+    
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS equipos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            codigo_equipo TEXT UNIQUE,
+            equipo TEXT,
+            area TEXT,
+            descripcion_funcionalidad TEXT,
+            especificaciones_tecnica_nombre TEXT,
+            especificaciones_tecnica_datos BLOB,
+            informes_json TEXT DEFAULT '[]',
+            creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            actualizado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # CARGAR DESDE GOOGLE SHEETS SI ESTÁ HABILITADO
+    if st.session_state.use_google_sheets:
+        print(f"🔄 Cargando equipos desde Google Sheets...")
+        if not cargar_desde_google_sheets('equipos', conn):
+            print("⚠️ No se pudieron cargar equipos desde Google Sheets")
     
     conn.commit()
     return conn
 
 def init_ot_unicas_db():
-    """Base de datos para códigos OT únicos - HÍBRIDA"""
+    """Base de datos para códigos OT únicos"""
     db_path = get_database_path('ot_unicas.db')
     conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
     c = conn.cursor()
@@ -347,8 +380,9 @@ def init_ot_unicas_db():
         )
     ''')
     
-    # CARGAR DESDE GOOGLE SHEETS AL INICIAR
+    # CARGAR DESDE GOOGLE SHEETS SI ESTÁ HABILITADO
     if st.session_state.use_google_sheets:
+        print(f"🔄 Cargando ot_unicas desde Google Sheets...")
         if not cargar_desde_google_sheets('ot_unicas', conn):
             print("⚠️ No se pudieron cargar ot_unicas desde Google Sheets")
     
@@ -356,7 +390,7 @@ def init_ot_unicas_db():
     return conn
 
 def init_ot_sufijos_db():
-    """Base de datos para códigos OT con sufijos - HÍBRIDA"""
+    """Base de datos para códigos OT con sufijos"""
     db_path = get_database_path('ot_sufijos.db')
     conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
     c = conn.cursor()
@@ -398,7 +432,7 @@ def init_ot_sufijos_db():
             responsables_finalizacion TEXT,
             descripcion_trabajo_realizado TEXT,
             imagen_final_nombre TEXT,
-            imagen_final_datas BLOB,
+            imagen_final_datos BLOB,
             observaciones_cierre TEXT,
             comentario TEXT,
             paro_linea TEXT DEFAULT "NO",
@@ -408,45 +442,17 @@ def init_ot_sufijos_db():
         )
     ''')
     
-    # CARGAR DESDE GOOGLE SHEETS AL INICIAR
+    # CARGAR DESDE GOOGLE SHEETS SI ESTÁ HABILITADO
     if st.session_state.use_google_sheets:
+        print(f"🔄 Cargando ot_sufijos desde Google Sheets...")
         if not cargar_desde_google_sheets('ot_sufijos', conn):
             print("⚠️ No se pudieron cargar ot_sufijos desde Google Sheets")
     
     conn.commit()
     return conn
 
-def init_equipos_db():
-    """Base de datos para información técnica de equipos - HÍBRIDA"""
-    db_path = get_database_path('equipos.db')
-    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
-    c = conn.cursor()
-    
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS equipos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            codigo_equipo TEXT UNIQUE,
-            equipo TEXT,
-            area TEXT,
-            descripcion_funcionalidad TEXT,
-            especificaciones_tecnica_nombre TEXT,
-            especificaciones_tecnica_datos BLOB,
-            informes_json TEXT DEFAULT '[]',
-            creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            actualizado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    # CARGAR DESDE GOOGLE SHEETS AL INICIAR
-    if st.session_state.use_google_sheets:
-        if not cargar_desde_google_sheets('equipos', conn):
-            print("⚠️ No se pudieron cargar equipos desde Google Sheets")
-    
-    conn.commit()
-    return conn
-
 def init_colaboradores_db():
-    """Base de datos para colaboradores - HÍBRIDA"""
+    """Base de datos para colaboradores"""
     db_path = get_database_path('colaboradores.db')
     conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
     c = conn.cursor()
@@ -474,11 +480,12 @@ def init_colaboradores_db():
                 VALUES (?, ?, ?, ?, ?)
             ''', ('70697318', 'Administrador', 'INTERNO', 'GERENTE', contraseña_hash))
             print("✅ Usuario administrador creado por defecto")
-        except:
-            pass
+        except Exception as e:
+            print(f"⚠️ Error creando admin: {e}")
     
-    # CARGAR DESDE GOOGLE SHEETS AL INICIAR
+    # CARGAR DESDE GOOGLE SHEETS SI ESTÁ HABILITADO
     if st.session_state.use_google_sheets:
+        print(f"🔄 Cargando colaboradores desde Google Sheets...")
         if not cargar_desde_google_sheets('colaboradores', conn):
             print("⚠️ No se pudieron cargar colaboradores desde Google Sheets")
     
@@ -936,15 +943,18 @@ def agregar_colaborador(codigo_id, nombre_colaborador, personal, cargo, contrase
         ''', (codigo_id, nombre_colaborador, personal, cargo, contraseña_hash))
         
         conn_colaboradores.commit()
-
+        
         # GUARDAR EN GOOGLE SHEETS SI ESTÁ HABILITADO
         if st.session_state.use_google_sheets:
-            with st.spinner("🔄 Guardando en la nube..."):
+            with st.spinner("🔄 Sincronizando con la nube..."):
                 if guardar_en_google_sheets('colaboradores', conn_colaboradores):
                     st.success("✅ Guardado en la nube exitosamente!")
                 else:
                     st.warning("⚠️ Guardado solo localmente")
-
+        
+        st.success(f"✅ Colaborador '{nombre_colaborador}' agregado exitosamente!")
+        st.success(f"🔑 Código para login: **{codigo_id}**")
+        
         return True
     except sqlite3.IntegrityError:
         st.error("❌ Error: El código ID ya existe en la base de datos")
@@ -1506,15 +1516,11 @@ def mostrar_formulario_equipos():
                 
                 # Procesar informe inicial si se subió
                 if informe_file is not None:
-                    datos_bytes = informe_file.getvalue()
-                    
                     informe_inicial = {
                         'nombre': informe_file.name,
                         'fecha_agregado': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         'tipo': informe_file.type if hasattr(informe_file, 'type') else 'application/octet-stream'
                     }
-                    # Guardar los bytes directamente en SQLite
-                    # En Google Sheets guardaremos solo el nombre
                     informes_json = json.dumps([informe_inicial])
                 
                 # Insertar en la base de datos local
@@ -1530,10 +1536,10 @@ def mostrar_formulario_equipos():
                       informes_json))
                 
                 conn_equipos.commit()
-
+                
                 # GUARDAR EN GOOGLE SHEETS SI ESTÁ HABILITADO
                 if st.session_state.use_google_sheets:
-                    with st.spinner("🔄 Guardando en la nube..."):
+                    with st.spinner("🔄 Sincronizando con la nube..."):
                         if guardar_en_google_sheets('equipos', conn_equipos):
                             st.success("✅ Guardado en la nube exitosamente!")
                         else:
@@ -5186,16 +5192,24 @@ def crear_backup_local():
         backup_file = backup_dir / f"backup_{timestamp}.zip"
         
         # Crear archivo ZIP con todas las bases
-        import zipfile
         with zipfile.ZipFile(backup_file, 'w') as zipf:
-            databases = ['data/avisos.db', 'data/equipos.db', 'data/ot_unicas.db', 
-                        'data/ot_sufijos.db', 'data/colaboradores.db']
+            databases = []
             
-            for db in databases:
-                if Path(db).exists():
-                    zipf.write(db, arcname=Path(db).name)
+            # Verificar qué bases de datos existen
+            for db_name in ['avisos.db', 'equipos.db', 'ot_unicas.db', 'ot_sufijos.db', 'colaboradores.db']:
+                db_path = get_database_path(db_name)
+                if Path(db_path).exists():
+                    databases.append(db_path)
+            
+            for db_path in databases:
+                zipf.write(db_path, arcname=Path(db_path).name)
         
-        return backup_file
+        if databases:
+            return backup_file
+        else:
+            st.warning("⚠️ No hay bases de datos para hacer backup")
+            return None
+            
     except Exception as e:
         st.error(f"❌ Error al crear backup local: {e}")
         return None
@@ -5222,17 +5236,47 @@ def main():
             submitted = st.form_submit_button("🚀 Iniciar Sesión")
             
             if submitted:
-                if codigo_id == "70697318" and contraseña == "deseandote1+":
-                    st.session_state.autenticado = True
-                    st.session_state.usuario = {
-                        'codigo_id': '70697318',
-                        'nombre': 'Administrador',
-                        'cargo': 'GERENTE'
-                    }
-                    st.success("✅ ¡Bienvenido, Administrador!")
-                    st.rerun()
+                if not codigo_id or not contraseña:
+                    st.error("❌ Complete todos los campos")
                 else:
-                    st.error("❌ Credenciales incorrectas")
+                    # Verificar credenciales
+                    try:
+                        c = conn_colaboradores.cursor()
+                        c.execute('SELECT codigo_id, nombre_colaborador, cargo, contraseña FROM colaboradores WHERE codigo_id = ?', (codigo_id,))
+                        usuario = c.fetchone()
+                        
+                        if usuario:
+                            contraseña_hash = hashlib.sha256(contraseña.encode()).hexdigest()
+                            if usuario[3] == contraseña_hash:
+                                st.session_state.autenticado = True
+                                st.session_state.usuario = {
+                                    'codigo_id': usuario[0],
+                                    'nombre': usuario[1],
+                                    'cargo': usuario[2]
+                                }
+                                st.success(f"✅ ¡Bienvenido, {usuario[1]}!")
+                                st.balloons()
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.error("❌ Contraseña incorrecta")
+                        else:
+                            # Si no existe el usuario, probar con el admin por defecto
+                            if codigo_id == "70697318" and contraseña == "deseandote1+":
+                                st.session_state.autenticado = True
+                                st.session_state.usuario = {
+                                    'codigo_id': '70697318',
+                                    'nombre': 'Administrador',
+                                    'cargo': 'GERENTE'
+                                }
+                                st.success("✅ ¡Bienvenido, Administrador!")
+                                st.balloons()
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.error("❌ Usuario no encontrado")
+                    except Exception as e:
+                        st.error(f"❌ Error del sistema: {e}")
         return
 
     # ===============================MENÚ PRINCIPAL (USUARIO AUTENTICADO)================================
@@ -5241,14 +5285,24 @@ def main():
     st.sidebar.title("🔧 Sistema de Mantenimiento")
     st.sidebar.markdown("---")
     
-    # Estado de sincronización
-    if st.session_state.use_google_sheets:
-        st.sidebar.success("✅ Conectado a Google Sheets")
+    # Estado del sistema
+    if EN_STREAMLIT_CLOUD:
+        st.sidebar.warning("🌐 **Streamlit Cloud**")
     else:
-        st.sidebar.warning("⚠️ Solo base de datos local")
+        st.sidebar.info("💻 **Modo local**")
+    
+    if st.session_state.use_google_sheets:
+        st.sidebar.success("✅ Google Sheets activado")
+        st.sidebar.caption("📊 Datos persistentes en la nube")
+    else:
+        st.sidebar.info("📁 Solo SQLite local")
+        if EN_STREAMLIT_CLOUD:
+            st.sidebar.caption("⚠️ Los datos se perderán al reiniciar")
+        else:
+            st.sidebar.caption("💻 Datos en carpeta `data/`")
     
     # Opciones del menú
-    menu_options = ["🏠 Inicio", "📝 Avisos de Mantenimiento", "📋 Órdenes de Trabajo", 
+    menu_options = ["🏠 Inicio", "📝 Avisos", "📋 Órdenes de Trabajo", 
                    "🏭 Gestión de Equipos", "👥 Colaboradores", "💾 Bases de Datos"]
     
     selected_menu = st.sidebar.selectbox("Navegación", menu_options)
@@ -5258,29 +5312,19 @@ def main():
     with st.sidebar.expander("🔄 Sincronización", expanded=False):
         
         if st.session_state.use_google_sheets:
-            # Botón para cargar desde la nube
-            if st.button("⬇️ Cargar desde la nube", use_container_width=True):
-                with st.spinner("Cargando datos desde Google Sheets..."):
-                    exitos = cargar_todas_tablas_desde_google()
-                    if exitos > 0:
-                        st.success(f"✅ {exitos} tablas cargadas desde la nube")
-                        st.rerun()
-                    else:
-                        st.error("❌ No se pudieron cargar datos")
-            
             # Botón para guardar en la nube
             if st.button("⬆️ Guardar en la nube", use_container_width=True):
-                with st.spinner("Guardando datos en Google Sheets..."):
-                    exitos = sincronizar_todas_tablas_a_google()
+                with st.spinner("Sincronizando con Google Sheets..."):
+                    exitos = sincronizar_todas_tablas()
                     if exitos > 0:
                         st.success(f"✅ {exitos} tablas guardadas en la nube")
                     else:
-                        st.error("❌ Error al guardar")
+                        st.error("❌ Error al sincronizar")
             
             st.markdown("---")
             
         # Backup local
-        if st.button("💾 Crear Backup Local", use_container_width=True):
+        if st.button("💾 Crear Backup", use_container_width=True):
             backup_file = crear_backup_local()
             if backup_file:
                 with open(backup_file, "rb") as f:
@@ -5325,11 +5369,25 @@ def main():
             with col4:
                 colab_count = pd.read_sql("SELECT COUNT(*) FROM colaboradores", conn_colaboradores).iloc[0][0]
                 st.metric("Colaboradores", colab_count)
-        except:
-            pass
+        except Exception as e:
+            print(f"⚠️ Error cargando estadísticas: {e}")
         
         st.markdown("---")
-        st.info("💡 **Sistema de persistencia activado:** Los datos se mantendrán incluso después de reinicios.")
+        
+        if st.session_state.use_google_sheets:
+            st.success("✅ **Persistencia activada**")
+            st.info("📊 **Datos guardados en:** Google Sheets")
+            st.info("🔄 **Sincronización automática:** Cada vez que agregas datos")
+        else:
+            if EN_STREAMLIT_CLOUD:
+                st.warning("⚠️ **Configura Google Sheets para persistencia:**")
+                st.code("""
+1. Agrega credenciales en Secrets
+2. Cambia USAR_GOOGLE_SHEETS = True
+                """)
+            else:
+                st.success("💻 **Modo local activado**")
+                st.info("📁 **Datos guardados en:** `data/` (tu computadora)")
         
     elif selected_menu == "🏭 Gestión de Equipos":
         st.title("🏭 Gestión de Equipos")
@@ -5342,7 +5400,7 @@ def main():
         with tab2:
             st.subheader("📊 Equipos Registrados")
             try:
-                df = pd.read_sql("SELECT * FROM equipos", conn_equipos)
+                df = pd.read_sql("SELECT codigo_equipo, equipo, area, descripcion_funcionalidad, creado_en FROM equipos", conn_equipos)
                 if df.empty:
                     st.info("No hay equipos registrados")
                 else:
@@ -5357,23 +5415,32 @@ def main():
         
         with tab1:
             st.subheader("➕ Agregar Nuevo Colaborador")
-            with st.form("form_colab"):
+            with st.form("form_colab", clear_on_submit=True):
                 col1, col2 = st.columns(2)
                 with col1:
-                    codigo_id = st.text_input("Código ID *")
-                    nombre = st.text_input("Nombre *")
+                    codigo_id = st.text_input("Código ID *", placeholder="Ej: MEC-001")
+                    nombre = st.text_input("Nombre Completo *", placeholder="Ej: Juan Pérez")
                     personal = st.selectbox("Personal *", ["INTERNO", "EXTERNO", "CONTRATISTA"])
                 with col2:
-                    cargo = st.selectbox("Cargo *", ["GERENTE", "JEFE DE MANTENIMIENTO", "TECNICO MECANICO", "TECNICO ELECTRICO"])
-                    contraseña = st.text_input("Contraseña *", type="password")
+                    cargo = st.selectbox("Cargo *", [
+                        "GERENTE", "JEFE DE MANTENIMIENTO", 
+                        "TECNICO MECANICO", "TECNICO ELECTRICO",
+                        "SUPERVISOR", "PLANNER DE MANTTO"
+                    ])
+                    contraseña = st.text_input("Contraseña *", type="password", placeholder="Mínimo 6 caracteres")
                     confirmar = st.text_input("Confirmar Contraseña *", type="password")
                 
-                if st.form_submit_button("💾 Guardar"):
-                    if contraseña != confirmar:
+                submitted = st.form_submit_button("💾 Guardar Colaborador")
+                
+                if submitted:
+                    if not all([codigo_id, nombre, cargo, contraseña, confirmar]):
+                        st.error("❌ Complete todos los campos")
+                    elif contraseña != confirmar:
                         st.error("❌ Las contraseñas no coinciden")
+                    elif len(contraseña) < 6:
+                        st.error("❌ La contraseña debe tener al menos 6 caracteres")
                     else:
                         if agregar_colaborador(codigo_id, nombre, personal, cargo, contraseña):
-                            st.success("✅ Colaborador agregado")
                             st.rerun()
         
         with tab2:
@@ -5394,33 +5461,53 @@ def main():
         
         with tab1:
             st.subheader("Base de Datos: Avisos")
-            df = pd.read_sql("SELECT * FROM avisos", conn_avisos)
-            st.dataframe(df, use_container_width=True)
-            st.write(f"Total registros: {len(df)}")
+            try:
+                df = pd.read_sql("SELECT * FROM avisos LIMIT 100", conn_avisos)
+                st.dataframe(df, use_container_width=True)
+                total = pd.read_sql("SELECT COUNT(*) as total FROM avisos", conn_avisos).iloc[0]['total']
+                st.write(f"Total registros: {total}")
+            except:
+                st.info("Tabla vacía o error al cargar")
         
         with tab2:
             st.subheader("Base de Datos: OT Únicas")
-            df = pd.read_sql("SELECT * FROM ot_unicas", conn_ot_unicas)
-            st.dataframe(df, use_container_width=True)
-            st.write(f"Total registros: {len(df)}")
+            try:
+                df = pd.read_sql("SELECT * FROM ot_unicas LIMIT 100", conn_ot_unicas)
+                st.dataframe(df, use_container_width=True)
+                total = pd.read_sql("SELECT COUNT(*) as total FROM ot_unicas", conn_ot_unicas).iloc[0]['total']
+                st.write(f"Total registros: {total}")
+            except:
+                st.info("Tabla vacía o error al cargar")
         
         with tab3:
             st.subheader("Base de Datos: OT Sufijos")
-            df = pd.read_sql("SELECT * FROM ot_sufijos", conn_ot_sufijos)
-            st.dataframe(df, use_container_width=True)
-            st.write(f"Total registros: {len(df)}")
+            try:
+                df = pd.read_sql("SELECT * FROM ot_sufijos LIMIT 100", conn_ot_sufijos)
+                st.dataframe(df, use_container_width=True)
+                total = pd.read_sql("SELECT COUNT(*) as total FROM ot_sufijos", conn_ot_sufijos).iloc[0]['total']
+                st.write(f"Total registros: {total}")
+            except:
+                st.info("Tabla vacía o error al cargar")
         
         with tab4:
             st.subheader("Base de Datos: Equipos")
-            df = pd.read_sql("SELECT * FROM equipos", conn_equipos)
-            st.dataframe(df, use_container_width=True)
-            st.write(f"Total registros: {len(df)}")
+            try:
+                df = pd.read_sql("SELECT * FROM equipos LIMIT 100", conn_equipos)
+                st.dataframe(df, use_container_width=True)
+                total = pd.read_sql("SELECT COUNT(*) as total FROM equipos", conn_equipos).iloc[0]['total']
+                st.write(f"Total registros: {total}")
+            except:
+                st.info("Tabla vacía o error al cargar")
         
         with tab5:
             st.subheader("Base de Datos: Colaboradores")
-            df = pd.read_sql("SELECT * FROM colaboradores", conn_colaboradores)
-            st.dataframe(df, use_container_width=True)
-            st.write(f"Total registros: {len(df)}")
+            try:
+                df = pd.read_sql("SELECT codigo_id, nombre_colaborador, personal, cargo, creado_en FROM colaboradores", conn_colaboradores)
+                st.dataframe(df, use_container_width=True)
+                total = pd.read_sql("SELECT COUNT(*) as total FROM colaboradores", conn_colaboradores).iloc[0]['total']
+                st.write(f"Total registros: {total}")
+            except:
+                st.info("Tabla vacía o error al cargar")
 
 if __name__ == "__main__":
     main()
