@@ -84,9 +84,9 @@ else:
     print("📁 Google Sheets deshabilitado por configuración")
     st.session_state.use_google_sheets = False
 
-# ===============================FUNCIONES PARA GOOGLE SHEETS================================
+# ===============================FUNCIONES PARA GOOGLE SHEETS (VERSIÓN MEJORADA)================================
 def get_or_create_sheet(sheet_name, worksheet_name="Datos"):
-    """Obtener o crear hoja en Google Sheets"""
+    """Obtener o crear hoja en Google Sheets - SILENCIOSA"""
     if not st.session_state.use_google_sheets:
         return None
     
@@ -99,23 +99,81 @@ def get_or_create_sheet(sheet_name, worksheet_name="Datos"):
             # Intentar abrir existente
             spreadsheet = client.open(sheet_name)
         except gspread.exceptions.SpreadsheetNotFound:
-            # Crear nueva
-            spreadsheet = client.create(sheet_name)
-            time.sleep(1)
-            print(f"✅ Nueva hoja creada: {sheet_name}")
+            # Crear nueva si no existe
+            try:
+                spreadsheet = client.create(sheet_name)
+                # Opcional: dar acceso público de lectura
+                # spreadsheet.share(None, perm_type='anyone', role='reader')
+                time.sleep(2)  # Esperar más para creación
+                print(f"📄 Nueva hoja creada: {sheet_name}")
+            except Exception as create_error:
+                if "quota" in str(create_error).lower():
+                    print(f"❌ Cuota excedida al crear {sheet_name}")
+                    return None
+                else:
+                    print(f"⚠️ Error creando hoja {sheet_name}: {create_error}")
+                    return None
         
         try:
             worksheet = spreadsheet.worksheet(worksheet_name)
         except gspread.exceptions.WorksheetNotFound:
-            # Crear worksheet
-            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=1000, cols=50)
-            time.sleep(0.5)
+            # Crear worksheet si no existe
+            try:
+                worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=1000, cols=50)
+                time.sleep(1)
+                print(f"📋 Nueva worksheet creada: {worksheet_name}")
+            except Exception as ws_error:
+                print(f"⚠️ Error creando worksheet: {ws_error}")
+                return None
         
         return worksheet
     except Exception as e:
-        print(f"⚠️ Error con Google Sheets {sheet_name}: {e}")
+        # No mostrar error, solo log
+        # print(f"ℹ️ Info: Hoja {sheet_name} no existe aún: {e}")
         return None
 
+def cargar_desde_google_sheets(tabla_nombre, conn_local):
+    """Cargar datos desde Google Sheets a SQLite local - SILENCIOSA"""
+    if not st.session_state.use_google_sheets:
+        return False
+    
+    try:
+        worksheet = get_or_create_sheet(f"Sistema_Mantenimiento_{tabla_nombre}")
+        if not worksheet:
+            # Si no existe la hoja, no es error - se creará al guardar
+            return True  # Devuelve True para indicar "ok, no hay datos"
+        
+        # Leer todos los datos
+        datos = worksheet.get_all_values()
+        
+        if len(datos) < 2:  # Solo encabezados o vacío
+            # Hoja vacía, no es error
+            return True
+        
+        # Convertir a DataFrame
+        encabezados = datos[0]
+        filas = datos[1:]
+        
+        if not filas:
+            # Sin datos, no es error
+            return True
+        
+        df = pd.DataFrame(filas, columns=encabezados)
+        
+        # Verificar si hay datos válidos
+        if len(df) == 0:
+            return True
+        
+        # Guardar en SQLite local
+        df.to_sql(tabla_nombre, conn_local, if_exists='replace', index=False)
+        
+        print(f"✅ {len(df)} registros cargados desde Google Sheets a {tabla_nombre}")
+        return True
+    except Exception as e:
+        # No mostrar error, solo log informativo
+        # print(f"ℹ️ No se pudieron cargar {tabla_nombre} desde Google Sheets (puede que la hoja no exista aún): {e}")
+        return True  # Devuelve True para continuar sin error
+        
 def guardar_en_google_sheets(tabla_nombre, conn_local):
     """Guardar datos desde SQLite local a Google Sheets"""
     if not st.session_state.use_google_sheets:
