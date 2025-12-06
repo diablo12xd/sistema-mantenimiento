@@ -1315,7 +1315,7 @@ def mostrar_formulario_colaboradores():
                 st.error("❌ El Código ID ya existe. Por favor, use un código diferente.")
                 return
             
-            if agregar_colaborador(codigo_id, nombre_colaborador, personal, cargo, contraseña):
+            if agregar_colaborador_con_sincronizacion(codigo_id, nombre_colaborador, personal, cargo, contraseña):
                 st.success(f"✅ Colaborador '{nombre_colaborador}' registrado exitosamente!")
                 st.success(f"🔑 Código para login: **{codigo_id}**")
                 st.balloons()
